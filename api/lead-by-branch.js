@@ -68,7 +68,15 @@ module.exports = async (req, res) => {
         d.Prioritas,
         r.tanggapan_mitra,
         r.alasan,
-        r.tanggal_follow_up
+        r.tanggal_follow_up,
+        r.validation,
+        r.validation_by,
+        r.tanggapam_original,
+        r.\`validation AM\`,
+        r.\`validation RM\`,
+        r.\`validation HO\`,
+        r.feedback_contact_number,
+        r.reason
       FROM data d
       LEFT JOIN response r
         ON r.id = (

@@ -1,0 +1,12 @@
+{
+  "name": "mysql-datatables-api",
+  "version": "1.0.0",
+  "description": "Generic DataTables Server-Side API for Aiven MySQL Testing",
+  "main": "api/users.js",
+  "scripts": {
+    "start": "node api/users.js"
+  },
+  "dependencies": {
+    "mysql2": "^3.9.0"
+  }
+}

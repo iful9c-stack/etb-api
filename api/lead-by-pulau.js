@@ -47,7 +47,7 @@ module.exports = async (req, res) => {
     const countQuery = `SELECT COUNT(*) AS total FROM data WHERE \`Pulau\` = ?`;
     
     // 2. Query Utama Ambil Data dengan Paginasi
-    const dataQuery = `
+   const dataQuery = `
       SELECT
         d.\`BP Majelis\`,
         d.\`customer number\`,
@@ -87,14 +87,15 @@ module.exports = async (req, res) => {
         r.feedback_contact_number,
         r.reason
       FROM data d
-      LEFT JOIN response r
-        ON r.id = (
-            SELECT r2.id
-            FROM response r2
-            WHERE r2.\`customer_number\` = d.\`customer number\`
-            ORDER BY TIMESTAMP(r2.\`timestamp\`) DESC, r2.id DESC
-            LIMIT 1
-        )
+      LEFT JOIN (
+        SELECT r1.*
+        FROM response r1
+        INNER JOIN (
+          SELECT customer_number, MAX(id) AS max_id
+          FROM response
+          GROUP BY customer_number
+        ) r2 ON r1.id = r2.max_id
+      ) r ON r.customer_number = d.\`customer number\`
       WHERE d.\`Pulau\` = ?
       LIMIT ? OFFSET ?
     `;

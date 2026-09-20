@@ -1,22 +1,31 @@
 const mysql = require('mysql2/promise');
 
-// Connection Pool
-const pool = mysql.createPool({
-  host: process.env.MYSQL_HOST || 'mysql-38a538aa-iful9c-fbda.d.aivencloud.com',
-  port: parseInt(process.env.MYSQL_PORT || '16305'),
-  database: process.env.MYSQL_DATABASE || 'etb',
-  user: process.env.MYSQL_USER || 'avnadmin',
-  password: process.env.MYSQL_PASSWORD || 'AVNS_RtK8bP4lVAIYuuZCblw',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  ssl: {
-    rejectUnauthorized: false
+// 1. Singleton Connection Pool (Mencegah koneksi menumpuk di Serverless/Vercel)
+let pool;
+
+function getPool() {
+  if (!pool) {
+    pool = mysql.createPool({
+      host: process.env.MYSQL_HOST || 'mysql-38a538aa-iful9c-fbda.d.aivencloud.com',
+      port: parseInt(process.env.MYSQL_PORT || '16305'),
+      database: process.env.MYSQL_DATABASE || 'etb',
+      user: process.env.MYSQL_USER || 'avnadmin',
+      password: process.env.MYSQL_PASSWORD || 'AVNS_RtK8bP4lVAIYuuZCblw',
+      waitForConnections: true,
+      connectionLimit: 3, // Dibatasi ke 3 agar slot koneksi Aiven tidak cepat habis
+      queueLimit: 0,
+      enableKeepAlive: true,
+      keepAliveInitialDelay: 0,
+      ssl: {
+        rejectUnauthorized: false
+      }
+    });
   }
-});
+  return pool;
+}
 
 module.exports = async (req, res) => {
-  // CORS Preflight
+  // CORS Preflight Header
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -39,15 +48,17 @@ module.exports = async (req, res) => {
 
   pulau = pulau.trim();
   page = Math.max(1, page);
-  limit = Math.max(1, limit); // Tanpa batas Math.min(100, limit)
+  limit = Math.max(1, limit); // Unlimited limit (bebas sesuai angka yang dimasukkan)
   const offset = (page - 1) * limit;
 
   try {
-    // 1. Query Total Data untuk Hitung Total Halaman
+    const db = getPool();
+
+    // 1. Query Total Data untuk Hitung Paginasi
     const countQuery = `SELECT COUNT(*) AS total FROM data WHERE \`Pulau\` = ?`;
-    
-    // 2. Query Utama Ambil Data dengan Paginasi
-   const dataQuery = `
+
+    // 2. Query Utama Ambil Data (Menggunakan Optimized JOIN agar jauh lebih cepat)
+    const dataQuery = `
       SELECT
         d.\`BP Majelis\`,
         d.\`customer number\`,
@@ -100,10 +111,10 @@ module.exports = async (req, res) => {
       LIMIT ? OFFSET ?
     `;
 
-    // Jalankan kedua query secara paralel
+    // Jalankan kedua query secara paralel menggunakan instance pool singleton
     const [[countResult], [rows]] = await Promise.all([
-      pool.query(countQuery, [pulau]),
-      pool.query(dataQuery, [pulau, limit, offset])
+      db.query(countQuery, [pulau]),
+      db.query(dataQuery, [pulau, limit, offset])
     ]);
 
     const totalData = countResult[0].total;

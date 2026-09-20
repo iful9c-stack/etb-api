@@ -1,19 +1,16 @@
 const mysql = require('mysql2/promise');
 
-// Connection Pool
-const pool = mysql.createPool({
+// Konfigurasi Database
+const dbConfig = {
   host: process.env.MYSQL_HOST || 'mysql-38a538aa-iful9c-fbda.d.aivencloud.com',
   port: parseInt(process.env.MYSQL_PORT || '16305'),
   database: process.env.MYSQL_DATABASE || 'etb',
   user: process.env.MYSQL_USER || 'avnadmin',
   password: process.env.MYSQL_PASSWORD || 'AVNS_RtK8bP4lVAIYuuZCblw',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
   ssl: {
     rejectUnauthorized: false
   }
-});
+};
 
 module.exports = async (req, res) => {
   // CORS Preflight
@@ -39,14 +36,19 @@ module.exports = async (req, res) => {
 
   regional = regional.trim();
   page = Math.max(1, page);
-  limit = Math.max(1, limit); // Tanpa batas Math.min(100, limit)
+  limit = Math.max(1, limit);
   const offset = (page - 1) * limit;
 
+  let connection;
+
   try {
-    // 1. Query Total Data untuk Hitung Total Halaman
+    // 1. Buka Koneksi Baru
+    connection = await mysql.createConnection(dbConfig);
+
+    // 2. Query Total Data untuk Hitung Total Halaman
     const countQuery = `SELECT COUNT(*) AS total FROM data WHERE \`Regional\` = ?`;
-    
-    // 2. Query Utama Ambil Data dengan Paginasi
+
+    // 3. Query Utama Ambil Data dengan Paginasi (Potong data dulu baru JOIN agar cepat)
     const dataQuery = `
       SELECT
         d.\`BP Majelis\`,
@@ -86,7 +88,11 @@ module.exports = async (req, res) => {
         r.\`validation HO\`,
         r.feedback_contact_number,
         r.reason
-      FROM data d
+      FROM (
+        SELECT * FROM data 
+        WHERE \`Regional\` = ? 
+        LIMIT ? OFFSET ?
+      ) d
       LEFT JOIN response r
         ON r.id = (
             SELECT r2.id
@@ -95,15 +101,11 @@ module.exports = async (req, res) => {
             ORDER BY TIMESTAMP(r2.\`timestamp\`) DESC, r2.id DESC
             LIMIT 1
         )
-      WHERE d.\`Regional\` = ?
-      LIMIT ? OFFSET ?
     `;
 
-    // Jalankan kedua query secara paralel
-    const [[countResult], [rows]] = await Promise.all([
-      pool.query(countQuery, [regional]),
-      pool.query(dataQuery, [regional, limit, offset])
-    ]);
+    // Jalankan kedua query secara berurutan
+    const [countResult] = await connection.query(countQuery, [regional]);
+    const [rows] = await connection.query(dataQuery, [regional, limit, offset]);
 
     const totalData = countResult[0].total;
     const totalPages = Math.ceil(totalData / limit);
@@ -130,5 +132,10 @@ module.exports = async (req, res) => {
       message: 'Database Error: ' + error.message,
       data: null
     });
+  } finally {
+    // 4. SELALU TUTUP KONEKSI (Mencegah "Too many connections")
+    if (connection) {
+      await connection.end();
+    }
   }
 };

@@ -1,31 +1,19 @@
 const mysql = require('mysql2/promise');
 
-// Singleton Connection Pool (Mencegah Error "Too many connections")
-let pool;
-
-function getPool() {
-  if (!pool) {
-    pool = mysql.createPool({
-      host: process.env.MYSQL_HOST || 'mysql-38a538aa-iful9c-fbda.d.aivencloud.com',
-      port: parseInt(process.env.MYSQL_PORT || '16305'),
-      database: process.env.MYSQL_DATABASE || 'etb',
-      user: process.env.MYSQL_USER || 'avnadmin',
-      password: process.env.MYSQL_PASSWORD || 'AVNS_RtK8bP4lVAIYuuZCblw',
-      waitForConnections: true,
-      connectionLimit: 3,
-      queueLimit: 0,
-      enableKeepAlive: true,
-      keepAliveInitialDelay: 0,
-      ssl: {
-        rejectUnauthorized: false
-      }
-    });
+// Konfigurasi Database
+const dbConfig = {
+  host: process.env.MYSQL_HOST || 'mysql-38a538aa-iful9c-fbda.d.aivencloud.com',
+  port: parseInt(process.env.MYSQL_PORT || '16305'),
+  database: process.env.MYSQL_DATABASE || 'etb',
+  user: process.env.MYSQL_USER || 'avnadmin',
+  password: process.env.MYSQL_PASSWORD || 'AVNS_RtK8bP4lVAIYuuZCblw',
+  ssl: {
+    rejectUnauthorized: false
   }
-  return pool;
-}
+};
 
 module.exports = async (req, res) => {
-  // CORS Preflight Header
+  // Header CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -34,7 +22,7 @@ module.exports = async (req, res) => {
     return res.status(200).end();
   }
 
-  // Parameter
+  // Parameter Input
   let pulau = req.query.pulau || (req.body && req.body.pulau);
   let page = parseInt(req.query.page || (req.body && req.body.page) || 1);
   let limit = parseInt(req.query.limit || (req.body && req.body.limit) || 10);
@@ -51,13 +39,16 @@ module.exports = async (req, res) => {
   limit = Math.max(1, limit);
   const offset = (page - 1) * limit;
 
-  try {
-    const db = getPool();
+  let connection;
 
-    // 1. Query Total Data (Hitung Paginasi)
+  try {
+    // 1. Buka Koneksi Baru Khusus untuk Request Ini
+    connection = await mysql.createConnection(dbConfig);
+
+    // 2. Query Total Data untuk Paginasi
     const countQuery = `SELECT COUNT(*) AS total FROM data WHERE \`Pulau\` = ?`;
 
-    // 2. Query Utama Ter-Optimasi (Potong data dulu dengan LIMIT, baru JOIN)
+    // 3. Query Data Utama (Optimized Subquery)
     const dataQuery = `
       SELECT
         d.\`BP Majelis\`,
@@ -112,11 +103,9 @@ module.exports = async (req, res) => {
         )
     `;
 
-    // Jalankan query secara paralel
-    const [[countResult], [rows]] = await Promise.all([
-      db.query(countQuery, [pulau]),
-      db.query(dataQuery, [pulau, limit, offset])
-    ]);
+    // Jalankan kedua query
+    const [countResult] = await connection.query(countQuery, [pulau]);
+    const [rows] = await connection.query(dataQuery, [pulau, limit, offset]);
 
     const totalData = countResult[0].total;
     const totalPages = Math.ceil(totalData / limit);
@@ -143,5 +132,10 @@ module.exports = async (req, res) => {
       message: 'Database Error: ' + error.message,
       data: null
     });
+  } finally {
+    // 4. SELALU TUTUP KONEKSI SETELAH SELESAI (BAIK SUKSES MAUPUN ERROR)
+    if (connection) {
+      await connection.end();
+    }
   }
 };

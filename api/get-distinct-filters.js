@@ -28,70 +28,59 @@ module.exports = async (req, res) => {
   const pulau = req.query.pulau || (req.body && req.body.pulau);
 
   try {
-    // 1. Dynamic Where Clause untuk tabel 'data'
-    const dataWhere = [];
+    // 1. Array penampung kondisi WHERE dinamis
+    const dataConditions = [];
     const dataParams = [];
 
     if (branch) {
-      dataWhere.push('d.`Branch` = ?');
+      dataConditions.push('d.`Branch` = ?');
       dataParams.push(String(branch).trim());
     }
     if (area) {
-      dataWhere.push('d.`Area` = ?');
+      dataConditions.push('d.`Area` = ?');
       dataParams.push(String(area).trim());
     }
     if (regional) {
-      dataWhere.push('d.`Regional` = ?');
+      dataConditions.push('d.`Regional` = ?');
       dataParams.push(String(regional).trim());
     }
     if (pulau) {
-      dataWhere.push('d.`Pulau` = ?');
+      dataConditions.push('d.`Pulau` = ?');
       dataParams.push(String(pulau).trim());
     }
 
-    const dataWhereSql = dataWhere.length > 0 ? `WHERE ${dataWhere.join(' AND ')}` : '';
+    // Helper Function untuk membangun Query Distinct secara aman
+    const buildQuery = (columnName) => {
+      const conditions = [...dataConditions, `${columnName} IS NOT NULL`, `${columnName} != ''`].join(' AND ');
+      return `
+        SELECT DISTINCT ${columnName} AS value 
+        FROM data d 
+        WHERE ${conditions}
+        ORDER BY value ASC
+      `;
+    };
 
-    // 2. Query Distinct Hari Kumpulan, Branch, dan BP Name (dari tabel 'data')
-    const sqlHariKumpulan = `
-      SELECT DISTINCT d.\`Hari Kumpulan\` AS value 
-      FROM data d 
-      ${dataWhereSql} 
-      AND d.\`Hari Kumpulan\` IS NOT NULL AND d.\`Hari Kumpulan\` != ''
-      ORDER BY value ASC
-    `;
+    // 2. Query Distinct Hari Kumpulan, Branch, dan BP Name
+    const sqlHariKumpulan = buildQuery('d.`Hari Kumpulan`');
+    const sqlBranch = buildQuery('d.`Branch`');
+    const sqlBpName = buildQuery('d.`BP Majelis`');
 
-    const sqlBranch = `
-      SELECT DISTINCT d.\`Branch\` AS value 
-      FROM data d 
-      ${dataWhereSql} 
-      AND d.\`Branch\` IS NOT NULL AND d.\`Branch\` != ''
-      ORDER BY value ASC
-    `;
-
-    const sqlBpName = `
-      SELECT DISTINCT d.\`BP Majelis\` AS value 
-      FROM data d 
-      ${dataWhereSql} 
-      AND d.\`BP Majelis\` IS NOT NULL AND d.\`BP Majelis\` != ''
-      ORDER BY value ASC
-    `;
-
-    // 3. Query Distinct Tanggapan Mitra (Perlu JOIN jika ada filter hierarki lokasi)
+    // 3. Query Distinct Tanggapan Mitra
     let sqlTanggapanMitra = '';
     let tanggapanParams = [];
 
-    if (dataWhere.length > 0) {
+    if (dataConditions.length > 0) {
+      const responseConditions = [...dataConditions, 'r.tanggapan_mitra IS NOT NULL', "TRIM(r.tanggapan_mitra) != ''"].join(' AND ');
       sqlTanggapanMitra = `
         SELECT DISTINCT TRIM(r.tanggapan_mitra) AS value
         FROM response r
         INNER JOIN data d ON d.\`customer number\` = r.customer_number
-        ${dataWhereSql}
-        AND r.tanggapan_mitra IS NOT NULL AND TRIM(r.tanggapan_mitra) != ''
+        WHERE ${responseConditions}
         ORDER BY value ASC
       `;
       tanggapanParams = dataParams;
     } else {
-      // Tanpa filter -> Query langsung ke tabel response (sangat cepat)
+      // Tanpa filter -> query langsung ke tabel response (sangat cepat)
       sqlTanggapanMitra = `
         SELECT DISTINCT TRIM(tanggapan_mitra) AS value
         FROM response
@@ -100,20 +89,19 @@ module.exports = async (req, res) => {
       `;
     }
 
-    // 4. Eksekusi 4 Query Secara Paralel (Promise.all) agar Waktu Eksekusi Maksimal
+    // 4. Eksekusi Paralel 4 Query Simultan
     const [
       [rowsHariKumpulan],
       [rowsBranch],
       [rowsBpName],
       [rowsTanggapan]
     ] = await Promise.all([
-      pool.query(sqlHariKumpulan.replace('WHERE  AND', 'WHERE'), dataParams),
-      pool.query(sqlBranch.replace('WHERE  AND', 'WHERE'), dataParams),
-      pool.query(sqlBpName.replace('WHERE  AND', 'WHERE'), dataParams),
-      pool.query(sqlTanggapanMitra.replace('WHERE  AND', 'WHERE'), tanggapanParams)
+      pool.query(sqlHariKumpulan, dataParams),
+      pool.query(sqlBranch, dataParams),
+      pool.query(sqlBpName, dataParams),
+      pool.query(sqlTanggapanMitra, tanggapanParams)
     ]);
 
-    // Format output menjadi Flat Array yang siap langsung dipakai di dropdown/select frontend
     return res.status(200).json({
       status: true,
       filters_applied: {

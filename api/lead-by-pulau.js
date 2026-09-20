@@ -1,6 +1,6 @@
 const mysql = require('mysql2/promise');
 
-// 1. Singleton Connection Pool (Mencegah koneksi menumpuk di Serverless/Vercel)
+// Singleton Connection Pool (Mencegah Error "Too many connections")
 let pool;
 
 function getPool() {
@@ -12,7 +12,7 @@ function getPool() {
       user: process.env.MYSQL_USER || 'avnadmin',
       password: process.env.MYSQL_PASSWORD || 'AVNS_RtK8bP4lVAIYuuZCblw',
       waitForConnections: true,
-      connectionLimit: 3, // Dibatasi ke 3 agar slot koneksi Aiven tidak cepat habis
+      connectionLimit: 3,
       queueLimit: 0,
       enableKeepAlive: true,
       keepAliveInitialDelay: 0,
@@ -34,7 +34,7 @@ module.exports = async (req, res) => {
     return res.status(200).end();
   }
 
-  // Ambil parameter pulau, page, dan limit dari Query String (GET) atau Body (POST)
+  // Parameter
   let pulau = req.query.pulau || (req.body && req.body.pulau);
   let page = parseInt(req.query.page || (req.body && req.body.page) || 1);
   let limit = parseInt(req.query.limit || (req.body && req.body.limit) || 10);
@@ -48,16 +48,16 @@ module.exports = async (req, res) => {
 
   pulau = pulau.trim();
   page = Math.max(1, page);
-  limit = Math.max(1, limit); // Unlimited limit (bebas sesuai angka yang dimasukkan)
+  limit = Math.max(1, limit);
   const offset = (page - 1) * limit;
 
   try {
     const db = getPool();
 
-    // 1. Query Total Data untuk Hitung Paginasi
+    // 1. Query Total Data (Hitung Paginasi)
     const countQuery = `SELECT COUNT(*) AS total FROM data WHERE \`Pulau\` = ?`;
 
-    // 2. Query Utama Ambil Data (Menggunakan Optimized JOIN agar jauh lebih cepat)
+    // 2. Query Utama Ter-Optimasi (Potong data dulu dengan LIMIT, baru JOIN)
     const dataQuery = `
       SELECT
         d.\`BP Majelis\`,
@@ -97,21 +97,22 @@ module.exports = async (req, res) => {
         r.\`validation HO\`,
         r.feedback_contact_number,
         r.reason
-      FROM data d
-      LEFT JOIN (
-        SELECT r1.*
-        FROM response r1
-        INNER JOIN (
-          SELECT customer_number, MAX(id) AS max_id
-          FROM response
-          GROUP BY customer_number
-        ) r2 ON r1.id = r2.max_id
-      ) r ON r.customer_number = d.\`customer number\`
-      WHERE d.\`Pulau\` = ?
-      LIMIT ? OFFSET ?
+      FROM (
+        SELECT * FROM data 
+        WHERE \`Pulau\` = ? 
+        LIMIT ? OFFSET ?
+      ) d
+      LEFT JOIN response r 
+        ON r.id = (
+          SELECT r2.id 
+          FROM response r2 
+          WHERE r2.\`customer_number\` = d.\`customer number\` 
+          ORDER BY r2.id DESC 
+          LIMIT 1
+        )
     `;
 
-    // Jalankan kedua query secara paralel menggunakan instance pool singleton
+    // Jalankan query secara paralel
     const [[countResult], [rows]] = await Promise.all([
       db.query(countQuery, [pulau]),
       db.query(dataQuery, [pulau, limit, offset])

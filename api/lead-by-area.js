@@ -25,8 +25,10 @@ module.exports = async (req, res) => {
     return res.status(200).end();
   }
 
-  // Ambil parameter area dari Query String (GET) atau Body (POST)
+  // Ambil parameter area, page, dan limit dari Query String (GET) atau Body (POST)
   let area = req.query.area || (req.body && req.body.area);
+  let page = parseInt(req.query.page || (req.body && req.body.page) || 1);
+  let limit = parseInt(req.query.limit || (req.body && req.body.limit) || 10);
 
   if (!area) {
     return res.status(400).json({
@@ -36,9 +38,16 @@ module.exports = async (req, res) => {
   }
 
   area = area.trim();
+  page = Math.max(1, page);
+  limit = Math.max(1, Math.min(100, limit)); // Maksimal 100 data per halaman
+  const offset = (page - 1) * limit;
 
   try {
-    const query = `
+    // 1. Query Total Data untuk Hitung Total Halaman
+    const countQuery = `SELECT COUNT(*) AS total FROM data WHERE \`Area\` = ?`;
+    
+    // 2. Query Utama Ambil Data dengan Paginasi
+    const dataQuery = `
       SELECT
         d.\`BP Majelis\`,
         d.\`customer number\`,
@@ -87,14 +96,31 @@ module.exports = async (req, res) => {
             LIMIT 1
         )
       WHERE d.\`Area\` = ?
+      LIMIT ? OFFSET ?
     `;
 
-    const [rows] = await pool.query(query, [area]);
+    // Jalankan kedua query secara paralel
+    const [[countResult], [rows]] = await Promise.all([
+      pool.query(countQuery, [area]),
+      pool.query(dataQuery, [area, limit, offset])
+    ]);
+
+    const totalData = countResult[0].total;
+    const totalPages = Math.ceil(totalData / limit);
 
     return res.status(200).json({
       status: true,
-      message: rows.length > 0 ? `Data lead untuk area '${area}' ditemukan.` : `Tidak ada data lead untuk area '${area}'.`,
-      total: rows.length,
+      message: rows.length > 0 
+        ? `Data lead untuk area '${area}' ditemukan.` 
+        : `Tidak ada data lead untuk area '${area}'.`,
+      pagination: {
+        total_data: totalData,
+        total_pages: totalPages,
+        current_page: page,
+        per_page: limit,
+        has_next_page: page < totalPages,
+        has_prev_page: page > 1
+      },
       data: rows
     });
 

@@ -25,7 +25,6 @@ module.exports = async (req, res) => {
     return res.status(200).end();
   }
 
-  // Menerima input dari GET (Query String) maupun POST (Body)
   let area = req.query.area || (req.body && req.body.area);
   let search = req.query.search || (req.body && req.body.search);
   let page = parseInt(req.query.page || (req.body && req.body.page) || 1);
@@ -41,18 +40,23 @@ module.exports = async (req, res) => {
   area = String(area).trim();
   search = search ? String(search).trim() : '';
   page = Math.max(1, page);
-  limit = Math.max(1, Math.min(100, limit)); // Maksimal limit 100 per halaman
+  limit = Math.max(1, Math.min(100, limit));
   const offset = (page - 1) * limit;
 
   try {
-    // 1. Kondisi Dasar Filter Area
-    let whereClause = 'WHERE d.`Area` = ?';
-    let queryParams = [area];
+    // 1. Dapatkan Total Keseluruhan Data per Area (Tanpa Search Filter) untuk Performa Cepat
+    const [areaTotalRows] = await pool.query(
+      'SELECT COUNT(DISTINCT `customer number`) AS total FROM data WHERE `Area` = ?',
+      [area]
+    );
+    const totalKeseluruhanData = areaTotalRows[0].total;
 
-    // 2. Fitur Global Search (Pencarian Keyword ke Semua Kolom)
+    // 2. Susun Conditional Search Filter
+    let searchClause = '';
+    let searchParams = [];
+
     if (search !== '') {
       const searchKeyword = `%${search}%`;
-      
       const searchableColumns = [
         'd.`BP Majelis`',
         'd.`customer number`',
@@ -83,39 +87,27 @@ module.exports = async (req, res) => {
         'r.`reason`'
       ];
 
-      // Menggabungkan seluruh kolom dengan kondisi OR LIKE ?
       const searchConditions = searchableColumns.map(col => `${col} LIKE ?`).join(' OR ');
+      searchClause = ` AND (${searchConditions})`;
       
-      whereClause += ` AND (${searchConditions})`;
-      
-      // Push keyword ke queryParams sebanyak kolom pencarian
       searchableColumns.forEach(() => {
-        queryParams.push(searchKeyword);
+        searchParams.push(searchKeyword);
       });
     }
 
-    // 3. Query Hitung Total Record (Untuk Paginasi)
-    const countQuery = `
-      SELECT COUNT(DISTINCT d.\`customer number\`) AS total
-      FROM data d
-      LEFT JOIN response r
-        ON r.id = (
-            SELECT r2.id
-            FROM response r2
-            WHERE r2.\`customer_number\` = d.\`customer number\`
-            ORDER BY TIMESTAMP(r2.\`timestamp\`) DESC, r2.id DESC
-            LIMIT 1
-        )
-      ${whereClause}
-    `;
-
-    const [countRows] = await pool.query(countQuery, queryParams);
-    const totalRecords = countRows[0].total;
-    const totalPages = Math.ceil(totalRecords / limit);
-
-    // 4. Query Utama Ambil Data (Sesuai Limit & Offset Paginasi)
-    const dataQuery = `
+    // 3. Query Utama dengan Optimasi CTE (Fast Response & Single Join Index)
+    const mainQuery = `
+      WITH latest_response AS (
+        SELECT r.*
+        FROM response r
+        INNER JOIN (
+          SELECT customer_number, MAX(id) AS max_id
+          FROM response
+          GROUP BY customer_number
+        ) r_max ON r.id = r_max.max_id
+      )
       SELECT
+        SQL_CALC_FOUND_ROWS
         d.\`BP Majelis\`,
         d.\`customer number\`,
         d.\`Customer Name\`,
@@ -154,21 +146,18 @@ module.exports = async (req, res) => {
         r.feedback_contact_number,
         r.reason
       FROM data d
-      LEFT JOIN response r
-        ON r.id = (
-            SELECT r2.id
-            FROM response r2
-            WHERE r2.\`customer_number\` = d.\`customer number\`
-            ORDER BY TIMESTAMP(r2.\`timestamp\`) DESC, r2.id DESC
-            LIMIT 1
-        )
-      ${whereClause}
+      LEFT JOIN latest_response r ON d.\`customer number\` = r.customer_number
+      WHERE d.\`Area\` = ? ${searchClause}
       LIMIT ? OFFSET ?
     `;
 
-    // Append limit dan offset ke queryParams
-    const fetchParams = [...queryParams, limit, offset];
-    const [rows] = await pool.query(dataQuery, fetchParams);
+    const queryParams = [area, ...searchParams, limit, offset];
+    const [rows] = await pool.query(mainQuery, queryParams);
+
+    // 4. Ambil Total Data Hasil Filter/Search
+    const [filteredCountRows] = await pool.query('SELECT FOUND_ROWS() AS total');
+    const totalDataFiltered = filteredCountRows[0].total;
+    const totalHalaman = Math.ceil(totalDataFiltered / limit);
 
     return res.status(200).json({
       status: true,
@@ -176,11 +165,12 @@ module.exports = async (req, res) => {
         ? `Data lead untuk area '${area}' ditemukan.` 
         : `Tidak ada data lead untuk area '${area}'.`,
       pagination: {
-        total_records: totalRecords,
-        total_pages: totalPages,
+        total_keseluruhan_data: totalKeseluruhanData, // Total seluruh data di area tersebut
+        total_data: totalDataFiltered,               // Total data setelah dikurangi filter/search
+        total_halaman: totalHalaman,                 // Total halaman yang tersedia
         current_page: page,
         per_page: limit,
-        has_next_page: page < totalPages,
+        has_next_page: page < totalHalaman,
         has_prev_page: page > 1
       },
       data: rows
